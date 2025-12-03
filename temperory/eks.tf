@@ -9,11 +9,11 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-2"
+  region = "us-east-1"
 }
 
 ############################
-# VPC + SUBNETS
+# VPC MODULE (Single AZ)
 ############################
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
@@ -22,14 +22,15 @@ module "vpc" {
   name = "eks-vpc"
   cidr = "10.0.0.0/16"
 
-  azs              = ["us-east-2a", "us-east-2b", "us-east-2c"]
-  private_subnets  = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
-  public_subnets   = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+  azs              = ["us-east-1a"]               # Single AZ
+  private_subnets  = ["10.0.1.0/24"]
+  public_subnets   = ["10.0.11.0/24"]
+
   enable_nat_gateway = true
   single_nat_gateway = true
 
   tags = {
-    "kubernetes.io/cluster/cicd_complete" = "shared"
+    "kubernetes.io/cluster/java-app-cluster" = "shared"
   }
 
   public_subnet_tags = {
@@ -62,11 +63,16 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
   role       = aws_iam_role.eks_cluster_role.name
 }
 
+resource "aws_iam_role_policy_attachment" "eks_vpc_controller" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
+  role       = aws_iam_role.eks_cluster_role.name
+}
+
 ############################
 # EKS CLUSTER
 ############################
 resource "aws_eks_cluster" "this" {
-  name     = "cicd_complete"
+  name     = "java-app-cluster"
   role_arn = aws_iam_role.eks_cluster_role.arn
   version  = "1.30"
 
@@ -75,7 +81,8 @@ resource "aws_eks_cluster" "this" {
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.eks_cluster_policy
+    aws_iam_role_policy_attachment.eks_cluster_policy,
+    aws_iam_role_policy_attachment.eks_vpc_controller
   ]
 }
 
@@ -111,36 +118,33 @@ resource "aws_iam_role_policy_attachment" "node_cni_policy" {
 }
 
 ############################
-# EKS MANAGED NODE GROUP
+# EKS NODE GROUP
 ############################
 resource "aws_eks_node_group" "this" {
   cluster_name    = aws_eks_cluster.this.name
-  node_group_name = "cicd_complete"
+  node_group_name = "java-app-nodegroup"
   node_role_arn   = aws_iam_role.eks_node_role.arn
   subnet_ids      = module.vpc.private_subnets
   version         = "1.30"
 
   scaling_config {
-    desired_size = 2
-    min_size     = 2
-    max_size     = 2
+    desired_size = 1
+    min_size     = 1
+    max_size     = 1
   }
 
-  instance_types = ["t2.large"]
-  disk_size      = 29
-  capacity_type  = "ON_DEMAND"
-  ami_type       = "AL2_x86_64"
+  instance_types = ["t2.medium"]
+  disk_size      = 30
 
-  remote_access {
-    ec2_ssh_key = "eks-nodegroup-key"
-  }
+  capacity_type = "ON_DEMAND"
+  ami_type      = "AL2_x86_64"
 
   depends_on = [
-    aws_eks_cluster.this
+    aws_eks_cluster.this,
+    aws_iam_role_policy_attachment.node_eks_worker,
+    aws_iam_role_policy_attachment.node_ecr_readonly,
+    aws_iam_role_policy_attachment.node_cni_policy
   ]
-  tags = {
-    Name="cicd_node"
-  }
 }
 
 ############################
@@ -156,24 +160,4 @@ output "cluster_endpoint" {
 
 output "cluster_certificate_authority_data" {
   value = aws_eks_cluster.this.certificate_authority[0].data
-}
-
-output "cluster_oidc_issuer_url" {
-  value = aws_eks_cluster.this.identity[0].oidc[0].issuer
-}
-
-output "node_group_iam_role_arn" {
-  value = aws_iam_role.eks_node_role.arn
-}
-
-output "private_subnets" {
-  value = module.vpc.private_subnets
-}
-
-output "public_subnets" {
-  value = module.vpc.public_subnets
-}
-
-output "vpc_id" {
-  value = module.vpc.vpc_id
 }
